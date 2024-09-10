@@ -8,9 +8,11 @@ import co.analisys.biblioteca.exception.PrestamoNoEncontradoException;
 import co.analisys.biblioteca.model.*;
 import co.analisys.biblioteca.repository.PrestamoRepository;
 import jakarta.transaction.Transactional;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -28,13 +30,14 @@ public class CirculacionService {
     private NotificacionClient notificacionClient;
 
     @Autowired
-    private RestTemplate restTemplate;
+    private RabbitTemplate rabbitTemplate;
+
+    @Autowired
+    private KafkaTemplate<String, NotificacionDTO> kafkaTemplate;
 
     @Transactional
     public void prestarLibro(UsuarioId usuarioId, LibroId libroId) {
         Boolean libroDisponible = catalogoClient.isLibroDisponible(libroId.getLibroid_value());
-//        Boolean libroDisponible = restTemplate.getForObject(
-//                "http://localhost:8082/libros/" + libroId.getLibroid_value() + "/disponible", Boolean.class);
 
         if (libroDisponible != null && libroDisponible) {
             Prestamo prestamo = new Prestamo(
@@ -47,21 +50,10 @@ public class CirculacionService {
             );
             prestamoRepository.save(prestamo);
             catalogoClient.actualizarDisponibilidad(libroId.getLibroid_value(), false);
-            notificacionClient.enviarNotificacion(new NotificacionDTO(usuarioId.getUsuarioid_value(), "Libro prestado: " + libroId.getLibroid_value()));
-
-//            // Actualizar disponibilidad
-//            HttpEntity<Boolean> requestEntity = new HttpEntity<>(false);
-//            restTemplate.exchange(
-//                    "http://localhost:8082" + "/libros/" + libroId.getLibroid_value() + "/disponibilidad",
-//                    HttpMethod.PUT,
-//                    requestEntity,
-//                    Void.class
-//            );
-//
-//            restTemplate.postForObject(
-//                    "http://localhost:8084/notificar",
-//                    new NotificacionDTO(usuarioId.getUsuarioid_value(), "Libro prestado: " + libroId.getLibroid_value()),
-//                    Void.class);
+//            notificacionClient.enviarNotificacion(new NotificacionDTO(usuarioId.getUsuarioid_value(), "Libro prestado: " + libroId.getLibroid_value()));
+            // Enviar notificación asíncrona
+            NotificacionDTO notificacion = new NotificacionDTO(usuarioId.getUsuarioid_value(), "Libro prestado: " + libroId.getLibroid_value());
+            rabbitTemplate.convertAndSend("notificacion.exchange", "notificacion.routingkey", notificacion);
         } else {
             throw new LibroNoDisponibleException(libroId);
         }
@@ -76,13 +68,12 @@ public class CirculacionService {
         prestamoRepository.save(prestamo);
 
         catalogoClient.actualizarDisponibilidad(prestamo.getLibroId().getLibroid_value(), true);
-        notificacionClient.enviarNotificacion(new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(), "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()));
-//        restTemplate.put("http://localhost:8082/libros/" + prestamo.getLibroId().getLibroid_value() + "/disponibilidad", true);
-//
-//        restTemplate.postForObject(
-//                "http://localhost:8084/notificar",
-//                new NotificacionDTO(prestamo.getUsuarioId().getUsuarioid_value(), "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()),
-//                Void.class);
+
+        NotificacionDTO notificacion = new NotificacionDTO(
+                prestamo.getUsuarioId().getUsuarioid_value(),
+                "Libro devuelto: " + prestamo.getLibroId().getLibroid_value()
+        );
+        kafkaTemplate.send("devolucion-libro", notificacion);
     }
 
     public List<Prestamo> obtenerTodosPrestamos() {
